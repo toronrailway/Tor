@@ -63,10 +63,20 @@ location paths sees every connection as coming from nginx itself.
 1. **Detects your public domain** automatically from Railway's
    `RAILWAY_PUBLIC_DOMAIN` (or `RAILWAY_STATIC_URL`) env var — set a
    `PUBLIC_DOMAIN` env var yourself to override this if needed.
-2. Logs into the panel API (`XUI_USERNAME` / `XUI_PASSWORD` env vars,
-   default `admin`/`admin` — **set these** if you've changed the panel
-   password, or the script's login will simply fail harmlessly and skip
-   provisioning).
+2. Authenticates to the panel API. Two options:
+   - **Recommended:** create an API token in the panel (Settings → API
+     Tokens → Create) and set it as the `XUI_API_TOKEN` env var on the
+     Railway service. Token auth survives panel restarts (unlike session
+     cookies) and doesn't need your admin password stored anywhere.
+   - **Fallback:** if `XUI_API_TOKEN` isn't set, the script logs in with
+     `XUI_USERNAME` / `XUI_PASSWORD` env vars (default `admin`/`admin` —
+     set these if you've changed the panel password, or login will fail
+     harmlessly and provisioning will be skipped).
+
+   ⚠️ **Never paste a real token or password into chat, a commit, or this
+   README.** Set it only as a Railway environment variable. If a token
+   ever ends up somewhere it shouldn't, revoke it immediately in
+   Settings → API Tokens and issue a new one.
 3. Creates 9 VLESS/WebSocket inbounds (`in1`..`in9`) matching the nginx
    path/port table below, each already carrying its Tor country as its tag.
 4. Adds a SOCKS5 outbound per Tor instance and a routing rule pinning each

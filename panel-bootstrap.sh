@@ -5,8 +5,11 @@
 # Runs once, after x-ui and nginx are already up. It:
 #   1. Auto-detects this deployment's public domain (Railway
 #      env vars, with manual override support).
-#   2. Logs into the panel API with a cookie jar (+ CSRF token
-#      if the panel returns one).
+#   2. Authenticates to the panel API — either via an API token
+#      (Authorization: Bearer, set as the XUI_API_TOKEN env var
+#      on Railway — never paste tokens in chat or commit them to
+#      the repo) or, if no token is set, via username/password
+#      cookie login (+ CSRF token if the panel returns one).
 #   3. Creates 9 VLESS/WebSocket inbounds (in1..in9), one per
 #      Tor exit country, matching the nginx path/port table.
 #   4. Adds a SOCKS5 outbound for each Tor instance and a
@@ -41,6 +44,12 @@ PANEL_USER="${XUI_USERNAME:-admin}"
 PANEL_PASS="${XUI_PASSWORD:-admin}"
 COOKIE_JAR="/tmp/xui-cookies.txt"
 CSRF_TOKEN=""
+# If XUI_API_TOKEN is set (as a Railway service env var — never hardcode
+# it in this file or paste it in chat), we use it as a Bearer token and
+# skip username/password login + the cookie jar entirely. Token auth is
+# the more robust option since it isn't invalidated by a panel restart
+# the way session cookies are.
+API_TOKEN="${XUI_API_TOKEN:-}"
 
 # ------------------------------------------------------------
 # 1. Auto-detect the public domain
@@ -86,6 +95,11 @@ wait_for_panel() {
 }
 
 login() {
+    if [ -n "$API_TOKEN" ]; then
+        LOG "✅ Using XUI_API_TOKEN (Bearer auth) — skipping username/password login."
+        return 0
+    fi
+
     resp=$(curl -s -c "$COOKIE_JAR" -X POST "${PANEL_INTERNAL}/login" \
         -d "username=${PANEL_USER}" -d "password=${PANEL_PASS}")
     ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
@@ -108,7 +122,10 @@ login() {
 
 api_post() {
     local path="$1" data="$2"
-    if [ -n "$CSRF_TOKEN" ]; then
+    if [ -n "$API_TOKEN" ]; then
+        curl -s -H "Content-Type: application/json" -H "Authorization: Bearer ${API_TOKEN}" \
+            -X POST "${PANEL_INTERNAL}${path}" -d "$data"
+    elif [ -n "$CSRF_TOKEN" ]; then
         curl -s -b "$COOKIE_JAR" -H "Content-Type: application/json" \
             -H "X-CSRF-Token: ${CSRF_TOKEN}" -X POST "${PANEL_INTERNAL}${path}" -d "$data"
     else
@@ -118,7 +135,11 @@ api_post() {
 }
 
 api_get() {
-    curl -s -b "$COOKIE_JAR" "${PANEL_INTERNAL}$1"
+    if [ -n "$API_TOKEN" ]; then
+        curl -s -H "Authorization: Bearer ${API_TOKEN}" "${PANEL_INTERNAL}$1"
+    else
+        curl -s -b "$COOKIE_JAR" "${PANEL_INTERNAL}$1"
+    fi
 }
 
 new_uuid() {
