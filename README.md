@@ -88,10 +88,13 @@ location paths sees every connection as coming from nginx itself.
 API endpoints are documented with one-line descriptions, not full JSON
 schemas, so step 4 (splicing outbounds/routing into the Xray config) is
 built from the well-established 3x-ui API conventions but hasn't been
-tested against your exact panel build. Check `/var/log/panel-bootstrap.log`
-inside the container (Railway → your service → logs, or `railway logs`) —
-if step 4 fails, it prints the exact API response and never overwrites your
-existing config, so nothing breaks even if a field name needs a tweak.
+tested against your exact panel build. Its `[panel-bootstrap] ...` log
+lines print directly into the same container log stream you already see
+in Railway's dashboard (`railway logs`) — no shell access needed — and
+are also mirrored to `/var/log/panel-bootstrap.log` inside the container.
+If step 4 fails, it prints the exact API response and never overwrites
+your existing config, so nothing breaks even if a field name needs a
+tweak.
 
 ## 🚀 Deployment Steps
 
@@ -215,9 +218,10 @@ specifically (see below). If the direct test is correct but proxying
 through the panel isn't, check the routing rule for that inbound tag in
 Settings → Xray Configs.
 
-**Inbounds/outbounds weren't auto-created** → check
-`/var/log/panel-bootstrap.log`. Most common cause: `XUI_USERNAME`/
-`XUI_PASSWORD` env vars don't match a changed panel password.
+**Inbounds/outbounds weren't auto-created** → look for `[panel-bootstrap]`
+lines directly in your Railway logs (they now stream live, no shell access
+needed). Most common cause: `XUI_USERNAME`/`XUI_PASSWORD` (or
+`XUI_API_TOKEN`) don't match a changed panel password/token.
 
 **Panel loads, config doesn't work** → covered above (buffering/timeouts);
 also double check Listen Port/Path match exactly.
@@ -231,9 +235,13 @@ if this happens, instead of failing silently.
 logs to its own `/var/log/tor/<name>/notices.log`; the watcher reports
 `[tor-watcher:<name>]` lines per instance. Datacenter hosts (Railway
 included) sometimes throttle or block outbound Tor directory traffic —
-if an instance never reaches `Bootstrapped 100%` within 90s, that's the
+if an instance never reaches `Bootstrapped 100%` within 180s, that's the
 likely cause, and it's outside this container's control. Other instances
-are unaffected since they're separate processes.
+are unaffected since they're separate processes. In testing, a *different*
+single instance occasionally timed out on different runs while the other
+8 succeeded — that pattern points to transient per-circuit flakiness on
+Railway's network, not a config problem, and it clears up on the next
+restart.
 
 **Slow speeds over a Tor outbound** → expected; Tor is inherently slower
 than a direct connection. Use it for specific users only, not all traffic.

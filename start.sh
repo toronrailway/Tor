@@ -151,8 +151,8 @@ fi
 # internally before doing anything.
 # ============================================
 if [ -x /panel-bootstrap.sh ]; then
-    echo "▶️  Launching panel-bootstrap.sh (background)..."
-    /panel-bootstrap.sh > /var/log/panel-bootstrap.log 2>&1 &
+    echo "▶️  Launching panel-bootstrap.sh (background, logs shown below)..."
+    /panel-bootstrap.sh 2>&1 | tee /var/log/panel-bootstrap.log &
 else
     echo "⚠️  /panel-bootstrap.sh not found or not executable — skipping auto inbound/outbound setup."
 fi
