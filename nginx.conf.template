@@ -2,6 +2,23 @@ worker_processes auto;
 events { worker_connections 1024; }
 
 http {
+    # ============================================
+    # FIX: "400 Request Header Or Cookie Too Large"
+    # nginx's defaults (client_header_buffer_size 1k,
+    # large_client_header_buffers 4x8k) are too small for
+    # the panel's session cookie, especially once a CSRF
+    # token and a couple of re-logins pile cookies up in
+    # the browser. Raise them here, on both the request
+    # side (headers coming FROM the browser) and the
+    # proxy side (headers coming back FROM x-ui, which
+    # nginx also has to buffer before relaying).
+    # ============================================
+    client_header_buffer_size 16k;
+    large_client_header_buffers 4 32k;
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    proxy_busy_buffers_size 32k;
+
     server {
         listen ${NGINX_PORT};
         server_name _;
