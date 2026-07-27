@@ -82,18 +82,23 @@ done
 # 1 shared random instance covering both remaining ports
 render_instance "random" "9058 9059" ""
 
-echo "▶️  Launching Tor instances (background, non-blocking)..."
+echo "▶️  Launching Tor instances (background, non-blocking, staggered)..."
 TOR_PIDS=()
 for name in "${TOR_TAGS[@]}" random; do
     tor -f "/etc/tor/instances/torrc.${name}" > "/var/log/tor/${name}-stdout.log" 2>&1 &
     TOR_PIDS+=($!)
     echo "  • ${name} → PID $!"
+    # Small stagger: launching all 9 at the exact same instant makes them
+    # fight each other (and nginx/x-ui, which are also starting) for CPU
+    # and outbound bandwidth during directory bootstrap — the ones
+    # launched last (ca, random) were the ones that timed out in testing.
+    sleep 1
 done
 
 # Background watcher: reports bootstrap status per instance but
 # never affects the main script's control flow or exit status.
 (
-    TIMEOUT=90
+    TIMEOUT=180
     for name in "${TOR_TAGS[@]}" random; do
         (
             ELAPSED=0
