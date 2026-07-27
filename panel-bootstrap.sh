@@ -10,16 +10,19 @@
 #      on Railway — never paste tokens in chat or commit them to
 #      the repo) or, if no token is set, via username/password
 #      cookie login (+ CSRF token if the panel returns one).
-#   3. Creates 9 VLESS/WebSocket inbounds (in1..in9), one per
-#      Tor exit country, matching the nginx path/port table —
-#      created EMPTY of clients (settings.clients: []).
+#   3. Creates 8 VLESS/WebSocket inbounds (in1..in8), one per
+#      strictly-pinned Tor exit country, matching the nginx
+#      path/port table — created EMPTY of clients
+#      (settings.clients: []). The old 9th "random" location has
+#      been removed entirely.
 #   4. Creates one client per inbound through the dedicated
 #      Clients API (POST /panel/api/clients/add) instead of
 #      hand-writing the client JSON inline in the inbound's
-#      settings. This is the actual bug fix — see below.
-#   5. Adds a SOCKS5 outbound for each Tor instance and a
-#      routing rule that pins each inbound's traffic to its
-#      matching country's Tor outbound.
+#      settings.
+#   5. Adds a SOCKS5 outbound for each Tor instance and an
+#      *enabled* routing rule that pins each inbound's traffic
+#      to its matching country's Tor outbound — this is the
+#      "auto-import into routing rules" step.
 #   6. Reads back the real client link from the panel itself
 #      (GET /panel/api/clients/links/{email}) instead of
 #      constructing the vless:// URI by hand in bash, and logs
@@ -28,63 +31,57 @@
 # ============================================================
 # WHY "COPY CONFIG" / "QR CODE" WERE UNAVAILABLE IN THE PANEL
 # ============================================================
-# The previous version of this script embedded the client
-# directly inside the inbound's settings JSON on creation:
+# An earlier version of this script embedded the client directly
+# inside the inbound's settings JSON on creation:
 #   settings.clients: [{ id: <uuid>, email: <email>, enable: true }]
-# That's only 3 fields. The panel's own client-creation code
-# (and its frontend "Copy"/"QR" buttons) expect a full client
-# record — subId, flow, limitIp, totalGB, expiryTime, reset,
-# tgId, comment, etc. When a client is missing subId in
-# particular, the panel's link-builder has nothing to key a
-# subscription/copy link off of, and the UI silently disables
-# or fails to render those buttons.
+# That's only 3 fields. The panel's own client-creation code (and
+# its frontend "Copy"/"QR" buttons) expect a full client record —
+# subId, flow, limitIp, totalGB, expiryTime, reset, tgId, comment,
+# etc. With subId missing, the panel's link-builder has nothing to
+# key a link off, so those buttons silently fail to render.
 #
-# The fix used here is to never hand-write the client JSON at
-# all. Instead:
-#   - The inbound is created with settings.clients: [] (no
-#     clients baked in).
-#   - The client is created afterwards via the panel's own
-#     POST /panel/api/clients/add endpoint, sending only the
-#     "universal" fields (email, totalGB, expiryTime, tgId,
-#     limitIp, enable). Per-protocol secrets (the VLESS UUID)
-#     and internal fields like subId are generated server-side
-#     by the panel itself when omitted.
-#   - The actual client link is then fetched via
-#     GET /panel/api/clients/links/{email} instead of being
-#     hand-assembled in bash.
+# Fix: the inbound is created with settings.clients: [] and the
+# client is added afterwards via POST /panel/api/clients/add,
+# sending only the "universal" fields — uuid/subId/etc. are
+# generated server-side by the panel itself, guaranteed to match
+# what its own UI expects. The actual link is then fetched via
+# GET /panel/api/clients/links/{email}.
 # ============================================================
-# WHY OUTBOUNDS + ROUTING RULES WERE NEVER ACTUALLY CREATED
+# WHY OUTBOUNDS + ROUTING RULES WEREN'T BEING SAVED
 # ============================================================
-# The previous version pulled the config from
-# GET /panel/api/server/getConfigJson (a READ-ONLY snapshot of
-# whatever Xray is currently running — not the panel's editable
-# template) and then wrote it back with
-# POST /panel/api/xray/update sending the raw JSON blob as an
-# `application/json` body.
-#
-# Per the panel's own API docs, /panel/api/xray/update "Save[s]
-# the Xray JSON config template ... Both are sent as form
-# fields" — i.e. it expects a normal form POST with a field
-# named `xraySetting` (the same key GET /panel/api/xray/
-# returns), NOT a raw JSON request body. Posting JSON there
-# means the panel never sees a populated `xraySetting` field,
-# so the save is a silent no-op — outbounds/routing rules never
-# actually land, even though the script logs "success" (because
-# the endpoint still returns 200/success, it just didn't get
-# any data to save).
+# /panel/api/xray/update expects a normal x-www-form-urlencoded
+# POST with a field named `xraySetting` (the same key
+# GET/POST /panel/api/xray/ itself returns) — NOT a raw JSON
+# request body, and NOT the read-only snapshot returned by
+# /panel/api/server/getConfigJson. Posting JSON there is a silent
+# no-op: the endpoint still returns success, but xraySetting was
+# never populated, so nothing is actually saved.
 #
 # Fixed here by:
 #   - Reading the editable template from POST /panel/api/xray/
-#     (its `obj.xraySetting` field — the config as a JSON
-#     *string*), not from getConfigJson.
-#   - Writing back with a real x-www-form-urlencoded POST to
-#     /panel/api/xray/update, field name `xraySetting`, using
-#     curl --data-urlencode so the embedded JSON survives
-#     encoding intact. outboundTestUrl is round-tripped too so
-#     it isn't accidentally cleared.
+#     (its obj.xraySetting field — a JSON *string*).
+#   - Writing back with curl --data-urlencode "xraySetting@<file>"
+#     against /panel/api/xray/update (file form, not inline, so it
+#     survives large configs without hitting argv size limits).
 #   - Verifying the write actually applied by re-fetching the
-#     template afterward and checking the tor outbounds are
+#     template afterward and checking every tor outbound is
 #     present, instead of trusting a bare "success" flag.
+#
+# ============================================================
+# WHY THE OUTBOUND/ROUTING JSON SHAPE CHANGED IN THIS VERSION
+# ============================================================
+# The corrected outbound object now matches Xray's full expected
+# shape instead of the bare-minimum one used before:
+#   - each SOCKS server entry includes "users": []
+#   - streamSettings.sockopt sets tcpFastOpen + tcpKeepAlive
+#   - each routing rule explicitly sets "enabled": true
+# The script also NEVER touches/duplicates the "direct" or
+# "blocked" outbounds — those already exist in the panel's base
+# Xray template, and re-adding them (as happened when merging
+# hand-written JSON by hand) produces two outbounds with the same
+# tag, which Xray will reject at load time. Only tor-<cc>
+# outbounds and their routing rules are added, and only if a tag
+# with that name doesn't already exist.
 # ============================================================
 
 set -u
@@ -98,9 +95,7 @@ COOKIE_JAR="/tmp/xui-cookies.txt"
 CSRF_TOKEN=""
 # If XUI_API_TOKEN is set (as a Railway service env var — never hardcode
 # it in this file or paste it in chat), we use it as a Bearer token and
-# skip username/password login + the cookie jar entirely. Token auth is
-# the more robust option since it isn't invalidated by a panel restart
-# the way session cookies are.
+# skip username/password login + the cookie jar entirely.
 API_TOKEN="${XUI_API_TOKEN:-}"
 
 # ------------------------------------------------------------
@@ -147,11 +142,6 @@ login() {
         return 0
     fi
 
-    # CSRF must be fetched BEFORE logging in — 3x-ui 3.5.0 protects
-    # /login itself, so a login POST sent without a token can be
-    # silently rejected before it ever reaches the auth handler. -c
-    # here seeds the cookie jar with whatever pre-session cookie the
-    # panel sets, which then gets carried into the login POST via -b.
     csrf_resp=$(curl -s -c "$COOKIE_JAR" "${PANEL_INTERNAL}/csrf-token")
     CSRF_TOKEN=$(echo "$csrf_resp" | jq -r '.obj // .token // empty' 2>/dev/null)
     if [ -n "$CSRF_TOKEN" ] && [ "$CSRF_TOKEN" != "null" ]; then
@@ -174,8 +164,6 @@ login() {
         fi
     }
 
-    # Attempt 1: JSON body (matches the documented /login schema exactly:
-    # {"username":..., "password":..., "twoFactorCode":...})
     json_data=$(jq -n --arg u "$PANEL_USER" --arg p "$PANEL_PASS" '{username:$u,password:$p}')
     raw=$(_attempt_login "application/json" "$json_data")
     status=$(echo "$raw" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
@@ -183,7 +171,6 @@ login() {
     ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
 
     if [ "$ok" != "true" ]; then
-        # Attempt 2: form-encoded, in case this build expects that instead
         LOG "JSON login didn't succeed (http ${status:-?}), retrying with form body..."
         raw=$(_attempt_login "application/x-www-form-urlencoded" "username=${PANEL_USER}&password=${PANEL_PASS}")
         status=$(echo "$raw" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
@@ -195,14 +182,11 @@ login() {
         LOG "❌ Login failed (http ${status:-unknown}). Response body: '${resp}'"
         LOG "    If the body is empty, this is very likely CSRF/anti-bot middleware"
         LOG "    rejecting the request rather than a wrong password — check that"
-        LOG "    XUI_USERNAME/XUI_PASSWORD are correct, then paste this log back"
-        LOG "    if it still fails so the request shape can be adjusted."
+        LOG "    XUI_USERNAME/XUI_PASSWORD are correct."
         return 1
     fi
     LOG "✅ Logged into panel API (http ${status})."
 
-    # Re-fetch CSRF post-login too — some panel versions rotate the
-    # token once a session exists.
     csrf_resp=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "${PANEL_INTERNAL}/csrf-token")
     fresh_token=$(echo "$csrf_resp" | jq -r '.obj // .token // empty' 2>/dev/null)
     if [ -n "$fresh_token" ] && [ "$fresh_token" != "null" ]; then
@@ -210,8 +194,6 @@ login() {
     fi
 }
 
-# JSON-body POST helper — used for every endpoint that genuinely
-# expects a JSON request body (inbounds/add, clients/add, etc).
 api_post() {
     local path="$1" data="$2"
     if [ -n "$API_TOKEN" ]; then
@@ -226,10 +208,6 @@ api_post() {
     fi
 }
 
-# Form-encoded POST helper — required for /panel/api/xray/update,
-# which (per the panel's own API docs) takes form fields, not a
-# raw JSON body. Extra args are passed straight through to curl,
-# so callers use --data-urlencode "field=value" for each field.
 api_post_form() {
     local path="$1"; shift
     if [ -n "$API_TOKEN" ]; then
@@ -254,12 +232,14 @@ api_get() {
 
 # ------------------------------------------------------------
 # 3. Location table — matches the nginx path/port map exactly.
+#    "random"/rand9 has been removed: 8 strictly-pinned
+#    countries only.
 # ------------------------------------------------------------
-TAGS=(us de fr nl ca jp sg gb rand9)
-LABELS=("United States" "Germany" "France" "Netherlands" "Canada" "Japan" "Singapore" "United Kingdom" "Random")
-LISTEN_PORTS=(8081 8082 8083 8084 8085 8086 8087 8088 8089)
-WS_PATHS=(/in1 /in2 /in3 /in4 /in5 /in6 /in7 /in8 /in9)
-TOR_PORTS=(9050 9051 9052 9053 9054 9055 9056 9057 9058)
+TAGS=(us de fr nl ca jp sg gb)
+LABELS=("United States" "Germany" "France" "Netherlands" "Canada" "Japan" "Singapore" "United Kingdom")
+LISTEN_PORTS=(8081 8082 8083 8084 8085 8086 8087 8088)
+WS_PATHS=(/in1 /in2 /in3 /in4 /in5 /in6 /in7 /in8)
+TOR_PORTS=(9050 9051 9052 9053 9054 9055 9056 9057)
 
 existing_inbound_tags() {
     api_get "/panel/api/inbounds/list/slim" | jq -r '.obj[]?.tag // empty' 2>/dev/null
@@ -279,9 +259,6 @@ client_exists() {
 
 # ------------------------------------------------------------
 # 4. Create the inbound — WITHOUT any client baked in.
-#    Clients are added afterwards through the Clients API so
-#    the panel itself generates every field its own UI needs
-#    (uuid, subId, flow, etc.) in the exact shape it expects.
 # ------------------------------------------------------------
 create_inbound() {
     local tag="$1" label="$2" port="$3" path="$4"
@@ -334,10 +311,7 @@ create_inbound() {
 
 # ------------------------------------------------------------
 # 5. Create the client through the dedicated Clients API and
-#    attach it to the inbound in one call. Only universal
-#    fields are sent — uuid/subId/etc. are generated by the
-#    panel itself, so the client is guaranteed to be shaped
-#    exactly the way the panel's own "Copy"/"QR" buttons expect.
+#    attach it to the inbound in one call.
 # ------------------------------------------------------------
 create_client() {
     local tag="$1" label="$2" inbound_id="$3"
@@ -374,9 +348,7 @@ create_client() {
 }
 
 # ------------------------------------------------------------
-# 6. Fetch the panel-generated link for a client — the exact
-#    string the "Copy" button in the UI would copy — instead
-#    of hand-assembling a vless:// URI in bash.
+# 6. Fetch the panel-generated link for a client.
 # ------------------------------------------------------------
 log_client_link() {
     local email="$1" label="$2"
@@ -399,12 +371,10 @@ log_client_link() {
 #    the panel's Xray config TEMPLATE, then save it back the
 #    way the panel's own Settings → Xray Configs page does.
 #
-#    IMPORTANT: this reads/writes POST /panel/api/xray/ and
-#    /panel/api/xray/update — NOT /panel/api/server/getConfigJson.
-#    getConfigJson is a read-only snapshot of whatever's
-#    currently running; it is not a valid target to write back
-#    to, and /update itself needs form fields, not a raw JSON
-#    body. See the big comment block at the top of this file.
+#    This is the "auto-import into routing rules" step. It only
+#    ever adds tor-<cc> outbounds/rules — "direct" and "blocked"
+#    already exist in the base template and are never touched,
+#    so no duplicate-tag config is ever produced.
 # ------------------------------------------------------------
 setup_outbounds_and_routing() {
     local tpl_resp current_json new_config
@@ -417,8 +387,6 @@ setup_outbounds_and_routing() {
         return 1
     fi
 
-    # obj.xraySetting is itself a JSON *string* (the raw template),
-    # not a nested object — pull it out as text.
     current_json=$(echo "$tpl_resp" | jq -r '.obj.xraySetting // empty')
     local outbound_test_url
     outbound_test_url=$(echo "$tpl_resp" | jq -r '.obj.outboundTestUrl // empty')
@@ -439,11 +407,16 @@ setup_outbounds_and_routing() {
         if [ "$already" != "0" ]; then
             LOG "Outbound ${outbound_tag} already exists, skipping."
         else
+            # Full outbound shape: server entry includes "users": [],
+            # and streamSettings.sockopt enables tcpFastOpen +
+            # tcpKeepAlive for lower-latency, more reliable Tor
+            # circuits — matching the corrected config shape.
             new_config=$(echo "$new_config" | jq --arg t "$outbound_tag" --argjson p "$torport" '
                 .outbounds += [{
                     tag: $t,
                     protocol: "socks",
-                    settings: { servers: [{ address: "127.0.0.1", port: $p }] }
+                    settings: { servers: [{ address: "127.0.0.1", port: $p, users: [] }] },
+                    streamSettings: { sockopt: { tcpFastOpen: true, tcpKeepAlive: true } }
                 }]')
         fi
 
@@ -453,35 +426,32 @@ setup_outbounds_and_routing() {
         if [ "$rule_exists" != "0" ]; then
             LOG "Routing rule for ${tag} already exists, skipping."
         else
+            # "enabled": true is set explicitly — some panel builds
+            # otherwise treat a rule without this key as disabled.
             new_config=$(echo "$new_config" | jq --arg t "$tag" --arg ot "$outbound_tag" '
                 .routing.rules = ((.routing.rules // []) + [{
                     type: "field",
+                    enabled: true,
                     inboundTag: [$t],
                     outboundTag: $ot
                 }])')
         fi
     done
 
+    # Belt-and-braces cleanup: if an old "rand9"/"random" outbound or
+    # routing rule was left over from a previous deploy of this
+    # container, strip it out too, since that location no longer
+    # exists.
+    new_config=$(echo "$new_config" | jq '
+        .outbounds |= map(select(.tag != "tor-rand9")) |
+        .routing.rules |= map(select((.inboundTag // []) | index("rand9") | not))
+    ')
+
     if [ "$new_config" = "$current_json" ]; then
         LOG "Outbounds + routing already up to date, nothing to save."
         return 0
     fi
 
-    # Real fix: form-encoded POST with field name "xraySetting",
-    # matching what GET/POST /panel/api/xray/ itself returns and
-    # what the docs say /update actually consumes.
-    #
-    # IMPORTANT: the edited config is large (9 inbounds + hosts +
-    # outbounds + routing rules can easily run tens of KB). Passing
-    # it inline as --data-urlencode "xraySetting=${new_config}" hands
-    # the whole thing to curl as a single argv element, which is
-    # subject to the kernel's per-argument size limit — in testing
-    # this silently truncated the payload and the panel rejected it
-    # with "xray template config invalid: unexpected end of JSON
-    # input". Writing it to a temp file and using curl's
-    # --data-urlencode name@file form (curl reads the FILE CONTENT
-    # as the field value and urlencodes it) sidesteps argv limits
-    # entirely regardless of config size.
     local tmp_config
     tmp_config=$(mktemp /tmp/xray-setting.XXXXXX.json)
     printf '%s' "$new_config" > "$tmp_config"
@@ -499,14 +469,10 @@ setup_outbounds_and_routing() {
         LOG "    Nothing was corrupted — the panel still has its old config."
         LOG "    Open the panel UI → check Settings → Xray Configs to add"
         LOG "    the SOCKS5 outbounds (127.0.0.1:9050-9057) and routing rules"
-        LOG "    by hand as a fallback, or paste this response back so the"
-        LOG "    script can be adjusted to your exact panel version."
+        LOG "    by hand as a fallback."
         return 1
     fi
 
-    # Verify the write actually took — the endpoint returning
-    # success:true doesn't guarantee the template was rewritten;
-    # this closes the loop the old script left open.
     sleep 1
     local verify_resp verify_json missing=0
     verify_resp=$(api_post "/panel/api/xray/" "{}")
@@ -546,8 +512,6 @@ for i in "${!TAGS[@]}"; do
     fi
 done
 
-# Give the panel a moment to commit the new inbounds before we
-# look their IDs back up for client attachment.
 sleep 1
 
 for i in "${!TAGS[@]}"; do

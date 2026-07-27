@@ -3,24 +3,25 @@
 #
 # start.sh generates each Tor instance's actual config inline
 # (see the render_instance() function in start.sh) rather than
-# substituting placeholders in this file. This file is kept only
-# as human-readable documentation of what each generated config
-# looks like conceptually — one independent Tor process per
-# country, each with its own DataDirectory, SocksPort, and
-# ExitNodes, so they can never bleed into each other. Safe to
-# delete from your repo; nothing references it.
+# substituting placeholders in this file. This file documents
+# what each of the 8 generated per-country configs looks like
+# conceptually — one independent Tor process per country, each
+# with its own DataDirectory, SocksPort, and strictly-enforced
+# ExitNodes, so they can never bleed into each other. The old
+# 9th "random"/no-ExitNodes instance has been removed — every
+# instance below is now a mandatory, single-country circuit.
+# Safe to delete from your repo; nothing references it.
 # ============================================================
 
 DataDirectory __DATADIR__
 PidFile __PIDFILE__
 SocksPort __SOCKSPORT__
 
-# Country pin for this instance only. Left empty by the
-# generator for the "random" instance (no ExitNodes line at
-# all = Tor picks any exit, which is what "random" means here).
-__EXITNODES_LINE__
-
+# Mandatory country pin for this instance. Every instance now
+# has one — there is no "random" case anymore.
+ExitNodes {__COUNTRY_CODE__}
 StrictNodes 1
+
 NumEntryGuards 4
 NumDirectoryGuards 3
 CircuitBuildTimeout 60

@@ -35,10 +35,13 @@ RUN chmod +x /start.sh /panel-bootstrap.sh
 # Railway injects PORT via environment variable and routes its public
 # domain to it automatically - no EXPOSE needed for that part.
 #
-# The Tor SOCKS ports (9050-9059) are documented here only so it's
+# The Tor SOCKS ports (9050-9057) are documented here only so it's
 # clear which ports exist if you choose to expose one publicly via
 # Railway's TCP Proxy feature (Settings -> Networking -> TCP Proxy).
 # EXPOSE has no effect on Railway routing by itself.
-EXPOSE 9050 9051 9052 9053 9054 9055 9056 9057 9058 9059
+#
+# NOTE: the "random" (9058/9059) instance has been removed entirely —
+# only the 8 country-pinned exits remain (us/de/fr/nl/ca/jp/sg/gb).
+EXPOSE 9050 9051 9052 9053 9054 9055 9056 9057
 
 CMD ["/start.sh"]
