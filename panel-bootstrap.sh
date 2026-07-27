@@ -216,17 +216,18 @@ create_inbound() {
         LOG "⚠️  Panel UUID endpoint didn't answer, generated one locally instead."
     fi
 
+    # FIX: Use JSON objects directly (no -c flag) and pass with --argjson
     local settings streamSettings sniffing
     settings=$(jq -n --arg id "$uuid" --arg email "${tag}-client" '{
         clients: [{ id: $id, email: $email, enable: true }],
         decryption: "none"
-    }' -c)
+    }')
 
     streamSettings=$(jq -n --arg path "$path" '{
         network: "ws",
         security: "none",
         wsSettings: { path: $path, headers: {} }
-    }' -c)
+    }')
 
     sniffing='{"enabled":true,"destOverride":["http","tls"]}'
 
@@ -235,9 +236,9 @@ create_inbound() {
         --arg remark "Tor-${label}" \
         --arg tag "$tag" \
         --argjson port "$port" \
-        --arg settings "$settings" \
-        --arg streamSettings "$streamSettings" \
-        --arg sniffing "$sniffing" '{
+        --argjson settings "$settings" \
+        --argjson streamSettings "$streamSettings" \
+        --argjson sniffing "$sniffing" '{
             up: 0, down: 0, total: 0,
             remark: $remark,
             enable: true,
