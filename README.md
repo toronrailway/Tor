@@ -1,24 +1,56 @@
 # 3x-ui + Tor on Railway
 
 Deploys 3x-ui with 9 independent Tor exit-country instances behind a single
-public nginx port, and auto-provisions the location inbounds + Tor outbounds
-+ routing rules through the panel API on boot.
+public nginx port, and auto-provisions the location inbounds + clients +
+Tor outbounds + routing rules through the panel API on boot.
 
 ## 🌟 Features
 
 - ✅ Panel + VLESS inbounds + Tor, all in one container
 - ✅ Single public port (nginx handles routing)
-- ✅ **9 real, independent exit countries** — each Tor SocksPort is now its
-  own Tor process with its own `ExitNodes`, so locations actually pin
-  correctly (see bug fix below)
+- ✅ **9 real, independent exit countries** — each Tor SocksPort is its own
+  Tor process with its own `ExitNodes`, so locations actually pin correctly
 - ✅ **Auto-provisioning**: on boot, a script logs into the panel API,
   auto-detects the deployment's public domain, creates the 9 location
-  inbounds, and wires each one to its matching Tor outbound via a routing
-  rule — no manual panel clicking required
+  inbounds, creates a client on each through the panel's own Clients API,
+  and wires each inbound to its matching Tor outbound via a routing rule —
+  no manual panel clicking required
 - ✅ Tor runs fully in the background — it can never block or crash the panel
 - ✅ nginx tuned correctly for VLESS-over-WebSocket on every path
 
-## 🐛 Bug fixed in this version: locations weren't actually pinning
+## 🐛 Bug fixed in this version: "Copy config" / "QR code" unavailable in the panel
+
+**Symptom:** inbounds, outbounds, and clients were all created successfully
+via the API, but the panel's "Copy" and "QR code" buttons for those clients
+didn't work.
+
+**Root cause:** `panel-bootstrap.sh` was hand-writing the client directly
+inside the inbound's `settings.clients[]` JSON on creation, with only three
+fields (`id`, `email`, `enable`). The panel's own client model — and the
+frontend code behind the "Copy"/"QR" buttons — expects a full client record
+(`subId`, `flow`, `limitIp`, `totalGB`, `expiryTime`, `reset`, `tgId`, etc).
+With `subId` in particular missing, the panel's link-builder has nothing to
+key a link off, so those buttons silently fail to render or do nothing.
+
+**Fix:** the script no longer hand-writes client JSON at all.
+1. Each inbound is now created with `settings.clients: []` — empty.
+2. The client is created afterwards through the panel's own
+   `POST /panel/api/clients/add` endpoint, sending only the "universal"
+   fields (`email`, `totalGB`, `expiryTime`, `tgId`, `limitIp`, `enable`).
+   Per-protocol secrets (the VLESS UUID) and internal fields like `subId`
+   are generated **server-side** by the panel itself when omitted — so
+   they're guaranteed to be in the exact shape the panel's own UI expects.
+3. Instead of hand-assembling a `vless://` URI in bash, the script now
+   calls `GET /panel/api/clients/links/{email}` and logs back the link the
+   panel itself generated — the same string its own "Copy" button would
+   copy.
+
+If you deployed an earlier version of this repo and already have clients
+stuck in the broken state, the quickest fix without touching the API is to
+open each client's edit modal in the panel UI once and hit **Save** — that
+forces the panel to recompute its cached client/link state.
+
+## 🐛 Bug fixed earlier: locations weren't actually pinning
 
 The previous `torrc` had **one shared `ExitNodes` setting for all 10
 SocksPorts**. Tor only supports one global exit-country setting per process
@@ -27,17 +59,18 @@ Germany" inside a single `torrc`. So every port was exiting from wherever
 Tor felt like, regardless of the country table, even though the panel and
 proxy themselves worked fine.
 
-**Fix:** `start.sh` now generates and launches **9 separate Tor processes**
-at container start — one per country, each with its own `DataDirectory`,
-its own `SocksPort`, and its own `ExitNodes {cc}` + `StrictNodes 1`. Because
+**Fix:** `start.sh` generates and launches **9 separate Tor processes** at
+container start — one per country, each with its own `DataDirectory`, its
+own `SocksPort`, and its own `ExitNodes {cc}` + `StrictNodes 1`. Because
 they're fully separate processes, they genuinely cannot bleed into each
 other. A 9th "random" instance covers the two ports that intentionally have
 no country restriction. The static `torrc` file is no longer used by the
 Dockerfile for this reason — the real per-instance configs are generated at
 runtime by `start.sh`. You can delete the old `torrc` from your repo, or
-keep it around as a reference (it isn't `COPY`'d into the image anymore).
+keep it around as a reference (`torrc.reference` — it isn't `COPY`'d into
+the image).
 
-## 🐛 The nginx bug this version also fixes
+## 🐛 Bug fixed earlier: nginx buffering/timeouts breaking VLESS-over-WS
 
 nginx buffers proxied responses by default. VLESS-over-WebSocket is a
 long-lived, bidirectional binary stream, not a normal request/response —
@@ -51,12 +84,12 @@ proxy_request_buffering off;
 proxy_read_timeout 3600s;
 proxy_send_timeout 3600s;
 ```
-This version also adds the `X-Real-IP` / `X-Forwarded-For` /
-`X-Forwarded-Proto` headers to `/in1`-`/in9` (they were previously only on
-`/` and `/managepanel/`) — without them, per-IP limiting/fail2ban on the
-location paths sees every connection as coming from nginx itself.
+This version also has the `X-Real-IP` / `X-Forwarded-For` /
+`X-Forwarded-Proto` headers on `/in1`-`/in9` (not just `/` and
+`/managepanel/`) — without them, per-IP limiting/fail2ban on the location
+paths sees every connection as coming from nginx itself.
 
-## 🤖 New: automatic inbound + outbound provisioning
+## 🤖 Automatic inbound + client + outbound provisioning
 
 `panel-bootstrap.sh` runs once in the background after x-ui comes up. It:
 
@@ -78,21 +111,24 @@ location paths sees every connection as coming from nginx itself.
    ever ends up somewhere it shouldn't, revoke it immediately in
    Settings → API Tokens and issue a new one.
 3. Creates 9 VLESS/WebSocket inbounds (`in1`..`in9`) matching the nginx
-   path/port table below, each already carrying its Tor country as its tag.
-4. Adds a SOCKS5 outbound per Tor instance and a routing rule pinning each
+   path/port table below, empty of clients, each tagged with its Tor
+   country.
+4. Creates one client per inbound through the panel's own Clients API
+   (`/panel/api/clients/add`) — not hand-written JSON — so every field the
+   panel's UI needs (UUID, subId, flow, etc.) is generated by the panel
+   itself.
+5. Adds a SOCKS5 outbound per Tor instance and a routing rule pinning each
    inbound's traffic to its matching outbound.
-5. Is safe to re-run (checks for existing tags/outbounds/rules first) — it
-   runs on every boot but won't duplicate anything.
+6. Reads back each client's real link via `/panel/api/clients/links/{email}`
+   and logs it.
+7. Is safe to re-run (checks for existing tags/clients/outbounds/rules
+   first) — it runs on every boot but won't duplicate anything.
 
-**Please verify this once after your first deploy.** The panel's public
-API endpoints are documented with one-line descriptions, not full JSON
-schemas, so step 4 (splicing outbounds/routing into the Xray config) is
-built from the well-established 3x-ui API conventions but hasn't been
-tested against your exact panel build. Its `[panel-bootstrap] ...` log
-lines print directly into the same container log stream you already see
-in Railway's dashboard (`railway logs`) — no shell access needed — and
+**Please verify this once after your first deploy.** `[panel-bootstrap]`
+log lines print directly into the same container log stream you already
+see in Railway's dashboard (`railway logs`) — no shell access needed — and
 are also mirrored to `/var/log/panel-bootstrap.log` inside the container.
-If step 4 fails, it prints the exact API response and never overwrites
+If any step fails, it prints the exact API response and never overwrites
 your existing config, so nothing breaks even if a field name needs a
 tweak.
 
@@ -105,8 +141,7 @@ Add these files to your GitHub repo root:
 - `start.sh`
 - `panel-bootstrap.sh`
 
-(`torrc` is no longer needed by the Dockerfile — safe to remove or keep as
-reference.)
+(`torrc.reference` is documentation only — safe to omit.)
 
 ### 2. Deploy on Railway
 1. [Railway.app](https://railway.app) → **New Project → Deploy from GitHub repo**
@@ -125,11 +160,12 @@ Default: `admin` / `admin` — **change immediately** in Settings, then set
 `XUI_USERNAME`/`XUI_PASSWORD` on the Railway service so the bootstrap
 script can still log in on the next restart.
 
-### 4. Inbounds are created automatically
+### 4. Inbounds + clients are created automatically
 
 Give `panel-bootstrap.sh` a minute after the panel comes up, then refresh
-the panel UI — `in1`..`in9` should already exist, tagged by country, wired
-to their matching Tor outbound.
+the panel UI — `in1`..`in9` should already exist, tagged by country, each
+with one client, wired to their matching Tor outbound. Copy/QR should work
+immediately since the clients were created through the panel's own API.
 
 | Path | Internal Port | Tor Exit Country | Tor Port |
 |------|---------------|-------------------|----------|
@@ -148,15 +184,13 @@ to their matching Tor outbound.
 If you'd rather build inbounds by hand instead of relying on the script:
 Protocol `VLESS`, Listen IP `0.0.0.0`, Network `ws`, Security `none`, Path
 matching the table above exactly, Listen Port matching the table above
-exactly.
+exactly — then add the client through the panel UI's own "Add client"
+button rather than editing the inbound's JSON directly.
 
 ### 5. Client Config
-The bootstrap script logs a ready-to-use client link (with your
-auto-detected domain filled in) to `/var/log/panel-bootstrap.log` for each
-inbound. It looks like:
-```
-vless://UUID@your-domain.up.railway.app:443?encryption=none&security=tls&sni=your-domain.up.railway.app&fp=chrome&type=ws&host=your-domain.up.railway.app&path=%2Fin1#Tor-US
-```
+The bootstrap script logs the panel-generated client link (fetched via the
+Clients API, not hand-built) to `/var/log/panel-bootstrap.log` for each
+inbound.
 
 ### Quick sanity check before testing with a real client
 Open in a browser:
@@ -209,19 +243,26 @@ assigned country.
 
 ## 🛠️ Troubleshooting
 
+**Copy config / QR code still unavailable for a client** → open that
+client's edit modal in the panel UI once and hit Save, which forces the
+panel to recompute its cached state. If it's still broken after that,
+check whether the client actually has a `subId` set: `GET
+/panel/api/clients/get/<email>` via the API and look for an empty
+`subId`; if you deployed the older buggy script, delete and recreate that
+client (`POST /panel/api/clients/del/<email>` then restart the container
+so `panel-bootstrap.sh` recreates it through the fixed path).
+
 **A location's traffic doesn't match the expected country** → confirm
 with the `curl --socks5-hostname` test above for that instance's port. If
 that direct test already shows the wrong country, check
-`/var/log/tor/<name>/notices.log` for that instance — it may still be
-bootstrapping or Railway may be throttling directory traffic for it
-specifically (see below). If the direct test is correct but proxying
-through the panel isn't, check the routing rule for that inbound tag in
-Settings → Xray Configs.
+`/var/log/tor/<name>/notices.log` for that instance. If the direct test is
+correct but proxying through the panel isn't, check the routing rule for
+that inbound tag in Settings → Xray Configs.
 
-**Inbounds/outbounds weren't auto-created** → look for `[panel-bootstrap]`
-lines directly in your Railway logs (they now stream live, no shell access
-needed). Most common cause: `XUI_USERNAME`/`XUI_PASSWORD` (or
-`XUI_API_TOKEN`) don't match a changed panel password/token.
+**Inbounds/clients/outbounds weren't auto-created** → look for
+`[panel-bootstrap]` lines directly in your Railway logs. Most common
+cause: `XUI_USERNAME`/`XUI_PASSWORD` (or `XUI_API_TOKEN`) don't match a
+changed panel password/token.
 
 **Panel loads, config doesn't work** → covered above (buffering/timeouts);
 also double check Listen Port/Path match exactly.
@@ -237,11 +278,7 @@ logs to its own `/var/log/tor/<name>/notices.log`; the watcher reports
 included) sometimes throttle or block outbound Tor directory traffic —
 if an instance never reaches `Bootstrapped 100%` within 180s, that's the
 likely cause, and it's outside this container's control. Other instances
-are unaffected since they're separate processes. In testing, a *different*
-single instance occasionally timed out on different runs while the other
-8 succeeded — that pattern points to transient per-circuit flakiness on
-Railway's network, not a config problem, and it clears up on the next
-restart.
+are unaffected since they're separate processes.
 
 **Slow speeds over a Tor outbound** → expected; Tor is inherently slower
 than a direct connection. Use it for specific users only, not all traffic.
@@ -255,6 +292,6 @@ than a direct connection. Use it for specific users only, not all traffic.
   filesystem. Add a Railway **Volume** mounted at `/etc/x-ui` if you don't
   want users/inbounds wiped on every redeploy (the bootstrap script is
   idempotent either way, so a redeploy without a volume just re-creates
-  the same 9 inbounds instead of erroring).
+  the same 9 inbounds/clients instead of erroring).
 - Restarting the container gives you fresh Tor exit IPs (all 9 instances).
 - This project is for educational purposes — use responsibly.

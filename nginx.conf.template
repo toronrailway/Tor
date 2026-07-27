@@ -107,9 +107,7 @@ http {
         # ============================================
         # MULTI-LOCATION INBOUNDS (1-9)
         # Same WebSocket fixes + same forwarded headers as
-        # the main location (earlier versions were missing
-        # X-Real-IP/X-Forwarded-For here, which breaks
-        # fail2ban / per-IP limiting on these paths).
+        # the main location.
         # ============================================
         location /in1 {
             proxy_pass http://127.0.0.1:8081;

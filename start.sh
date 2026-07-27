@@ -145,7 +145,8 @@ if ! kill -0 "$X_UI_PID" 2>/dev/null; then
 fi
 
 # ============================================
-# AUTO-CREATE LOCATION INBOUNDS + TOR OUTBOUNDS
+# AUTO-CREATE LOCATION INBOUNDS + CLIENTS + TOR
+# OUTBOUNDS
 # Runs in the background so it can never delay
 # nginx from binding $PORT. Waits for x-ui itself
 # internally before doing anything.
