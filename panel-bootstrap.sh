@@ -100,23 +100,67 @@ login() {
         return 0
     fi
 
-    resp=$(curl -s -c "$COOKIE_JAR" -X POST "${PANEL_INTERNAL}/login" \
-        -d "username=${PANEL_USER}" -d "password=${PANEL_PASS}")
-    ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
-    if [ "$ok" != "true" ]; then
-        LOG "❌ Login failed. Response: $resp"
-        return 1
-    fi
-    LOG "✅ Logged into panel API."
-
-    # CSRF token is optional depending on version — best effort.
-    csrf_resp=$(curl -s -b "$COOKIE_JAR" "${PANEL_INTERNAL}/csrf-token")
+    # CSRF must be fetched BEFORE logging in, not after — 3x-ui 3.5.0
+    # protects /login itself, so a login POST sent without a token can
+    # be silently rejected before it ever reaches the auth handler
+    # (that's the empty-body failure seen in testing). -c here seeds
+    # the cookie jar with whatever pre-session/CSRF cookie the panel
+    # sets, which then gets carried into the login POST below via -b.
+    csrf_resp=$(curl -s -c "$COOKIE_JAR" "${PANEL_INTERNAL}/csrf-token")
     CSRF_TOKEN=$(echo "$csrf_resp" | jq -r '.token // .obj // empty' 2>/dev/null)
     if [ -n "$CSRF_TOKEN" ] && [ "$CSRF_TOKEN" != "null" ]; then
-        LOG "Got CSRF token."
+        LOG "Got CSRF token before login."
     else
         CSRF_TOKEN=""
-        LOG "No CSRF token returned (fine on older panel versions)."
+        LOG "No CSRF token available yet (may not be required on your version)."
+    fi
+
+    _attempt_login() {
+        local content_type="$1" data="$2"
+        if [ -n "$CSRF_TOKEN" ]; then
+            curl -s -w "\nHTTP_STATUS:%{http_code}" -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+                -H "Content-Type: ${content_type}" -H "X-CSRF-Token: ${CSRF_TOKEN}" \
+                -X POST "${PANEL_INTERNAL}/login" -d "$data"
+        else
+            curl -s -w "\nHTTP_STATUS:%{http_code}" -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+                -H "Content-Type: ${content_type}" \
+                -X POST "${PANEL_INTERNAL}/login" -d "$data"
+        fi
+    }
+
+    # Attempt 1: form-encoded (the traditional x-ui login format)
+    raw=$(_attempt_login "application/x-www-form-urlencoded" "username=${PANEL_USER}&password=${PANEL_PASS}")
+    status=$(echo "$raw" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+    resp=$(echo "$raw" | sed '$ d')
+    ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
+
+    if [ "$ok" != "true" ]; then
+        # Attempt 2: JSON body, in case this version expects that instead
+        LOG "Form-encoded login didn't succeed (http ${status:-?}), retrying with JSON body..."
+        json_data=$(jq -n --arg u "$PANEL_USER" --arg p "$PANEL_PASS" '{username:$u,password:$p}')
+        raw=$(_attempt_login "application/json" "$json_data")
+        status=$(echo "$raw" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+        resp=$(echo "$raw" | sed '$ d')
+        ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
+    fi
+
+    if [ "$ok" != "true" ]; then
+        LOG "❌ Login failed (http ${status:-unknown}). Response body: '${resp}'"
+        LOG "    If the body is empty, this is very likely CSRF/anti-bot middleware"
+        LOG "    rejecting the request rather than a wrong password — check that"
+        LOG "    XUI_USERNAME/XUI_PASSWORD are correct, then paste this log back"
+        LOG "    if it still fails so the request shape can be adjusted."
+        return 1
+    fi
+    LOG "✅ Logged into panel API (http ${status})."
+
+    # Re-fetch CSRF post-login too — some panel versions rotate the
+    # token once a session exists, and later API calls should use the
+    # freshest one available.
+    csrf_resp=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "${PANEL_INTERNAL}/csrf-token")
+    fresh_token=$(echo "$csrf_resp" | jq -r '.token // .obj // empty' 2>/dev/null)
+    if [ -n "$fresh_token" ] && [ "$fresh_token" != "null" ]; then
+        CSRF_TOKEN="$fresh_token"
     fi
 }
 
