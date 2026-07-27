@@ -1,0 +1,29 @@
+# ============================================================
+# BASE TEMPLATE — not used directly.
+# start.sh renders one real torrc per Tor instance from this
+# file by substituting the __PLACEHOLDER__ tokens below. This
+# is what makes per-port exit-country pinning actually work:
+# each instance is a fully separate Tor process with its own
+# DataDirectory, its own SocksPort, and its own ExitNodes, so
+# they can never bleed into each other.
+# ============================================================
+
+DataDirectory __DATADIR__
+PidFile __PIDFILE__
+SocksPort __SOCKSPORT__
+
+# Country pin for this instance only. Left empty by the
+# generator for the "random" instance (no ExitNodes line at
+# all = Tor picks any exit, which is what "random" means here).
+__EXITNODES_LINE__
+
+StrictNodes 1
+NumEntryGuards 4
+NumDirectoryGuards 3
+CircuitBuildTimeout 60
+KeepalivePeriod 600
+ExcludeExitNodes {ir},{kp},{cn},{ru},{sy},{cu},{ve}
+
+Log notice file __LOGDIR__/notices.log
+Log warn file __LOGDIR__/warnings.log
+LogTimeGranularity 1
