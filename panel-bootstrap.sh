@@ -469,14 +469,30 @@ setup_outbounds_and_routing() {
 
     # Real fix: form-encoded POST with field name "xraySetting",
     # matching what GET/POST /panel/api/xray/ itself returns and
-    # what the docs say /update actually consumes. --data-urlencode
-    # keeps the embedded JSON (quotes, braces, newlines) intact.
-    local update_args=(--data-urlencode "xraySetting=${new_config}")
+    # what the docs say /update actually consumes.
+    #
+    # IMPORTANT: the edited config is large (9 inbounds + hosts +
+    # outbounds + routing rules can easily run tens of KB). Passing
+    # it inline as --data-urlencode "xraySetting=${new_config}" hands
+    # the whole thing to curl as a single argv element, which is
+    # subject to the kernel's per-argument size limit — in testing
+    # this silently truncated the payload and the panel rejected it
+    # with "xray template config invalid: unexpected end of JSON
+    # input". Writing it to a temp file and using curl's
+    # --data-urlencode name@file form (curl reads the FILE CONTENT
+    # as the field value and urlencodes it) sidesteps argv limits
+    # entirely regardless of config size.
+    local tmp_config
+    tmp_config=$(mktemp /tmp/xray-setting.XXXXXX.json)
+    printf '%s' "$new_config" > "$tmp_config"
+
+    local update_args=(--data-urlencode "xraySetting@${tmp_config}")
     if [ -n "$outbound_test_url" ] && [ "$outbound_test_url" != "null" ]; then
         update_args+=(--data-urlencode "outboundTestUrl=${outbound_test_url}")
     fi
 
     resp=$(api_post_form "/panel/api/xray/update" "${update_args[@]}")
+    rm -f "$tmp_config"
     ok=$(echo "$resp" | jq -r '.success // empty' 2>/dev/null)
     if [ "$ok" != "true" ]; then
         LOG "❌ Saving outbounds/routing failed. Response: $resp"
