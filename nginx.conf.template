@@ -56,6 +56,24 @@ http {
         }
 
         # ============================================
+        # TOR ROTATION STATUS
+        # start.sh's background rotator writes one JSON file per
+        # location here every ROTATE_SECONDS (default 60s), each
+        # containing the location's current exit IP and whether it
+        # answered a live ping check through it. e.g.:
+        #   GET /tor-status/us.json
+        #   GET /tor-status/direct.json   (the real, non-Tor server IP)
+        # Read-only static files, refreshed on disk by the rotator —
+        # nginx just serves whatever's currently there.
+        # ============================================
+        location /tor-status/ {
+            alias /var/www/tor-status/;
+            access_log off;
+            add_header Content-Type application/json;
+            add_header Cache-Control "no-store";
+        }
+
+        # ============================================
         # PANEL WEB INTERFACE
         # ============================================
         location /managepanel/ {

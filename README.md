@@ -11,13 +11,56 @@ Tor outbounds + routing rules through the panel API on boot.
 - ✅ **8 real, independent exit countries** — each Tor SocksPort is its own
   Tor process with its own `ExitNodes` + `StrictNodes 1`, so locations
   actually pin correctly and never silently fall back to a random exit
+- ✅ **Automatic IP rotation** — every `ROTATE_SECONDS` (default **60s**),
+  each location's Tor process is sent `SIGNAL NEWNYM` over its own
+  loopback-only ControlPort, forcing a brand-new circuit/exit IP. Every
+  rotation is verified live (fetches the new exit IP and pings through it)
+  before being trusted, and the result is written to
+  `/tor-status/<location>.json`
+- ✅ **Real-IP location included** — a plain, non-Tor VLESS inbound (`/`,
+  port 8080) is auto-provisioned alongside the 8 Tor locations, so you
+  always have a "use the server's actual IP" option too, and its
+  reachability is checked the same way (`/tor-status/direct.json`)
 - ✅ **Auto-provisioning**: on boot, a script logs into the panel API,
-  auto-detects the deployment's public domain, creates the 8 location
-  inbounds, creates a client on each through the panel's own Clients API,
-  and auto-imports a routing rule wiring each inbound to its matching Tor
-  outbound — no manual panel clicking required
+  auto-detects the deployment's public domain, creates all 9 location
+  inbounds (8 Tor + 1 real-IP), creates a client on each through the
+  panel's own Clients API, and auto-imports a routing rule wiring each
+  Tor inbound to its matching Tor outbound — no manual panel clicking
+  required
 - ✅ Tor runs fully in the background — it can never block or crash the panel
 - ✅ nginx tuned correctly for VLESS-over-WebSocket on every path
+
+## 🔁 Automatic IP rotation (new)
+
+Each of the 8 Tor instances gets its own **loopback-only** `ControlPort`
+(9150-9157) with cookie authentication. A background loop in `start.sh`:
+
+1. Waits 30s after boot for Tor to finish bootstrapping and write its
+   control-auth cookie.
+2. Every `ROTATE_SECONDS` (default `60`, override via an env var on the
+   Railway service), for each location: authenticates on its ControlPort
+   using the cookie Tor itself wrote to disk, sends `SIGNAL NEWNYM` (Tor's
+   official "give me a new circuit/identity" command), waits a few
+   seconds for the new circuit to build, then **actually verifies it** by
+   fetching the new exit IP through that instance's SocksPort and
+   checking `https://check.torproject.org/api/ip` returns `200` through
+   it.
+3. Writes the result to `/var/www/tor-status/<location>.json`, which
+   nginx serves read-only at:
+   ```
+   https://your-domain.up.railway.app/tor-status/us.json
+   https://your-domain.up.railway.app/tor-status/de.json
+   ...
+   https://your-domain.up.railway.app/tor-status/direct.json   ← real server IP
+   ```
+   Example contents: `{"location":"us","exit_ip":"1.2.3.4","reachable":true,"checked_at":"2026-07-28T12:00:00Z"}`
+
+If a rotation's verification fails (exit didn't respond in time), the
+existing circuit is left in place rather than traffic being dropped —
+`reachable:false` just tells you that particular cycle's check didn't
+confirm, and it retries again next cycle. The ControlPort itself is never
+bound to `0.0.0.0` and is not in the Dockerfile's `EXPOSE` list, so it's
+never reachable from outside the container.
 
 ## 🐛 Bug fixed in this version: the shared "random" exit removed, outbound/routing JSON corrected
 
@@ -151,17 +194,20 @@ Default: `admin` / `admin` — **change immediately** in Settings, then set
 
 ### 4. Inbounds + clients are created automatically
 
-| Path | Internal Port | Tor Exit Country | Tor Port |
-|------|---------------|-------------------|----------|
-| `/` | 8080 | (direct, no Tor) | — |
-| `/in1` | 8081 | United States | 9050 |
-| `/in2` | 8082 | Germany | 9051 |
-| `/in3` | 8083 | France | 9052 |
-| `/in4` | 8084 | Netherlands | 9053 |
-| `/in5` | 8085 | Canada | 9054 |
-| `/in6` | 8086 | Japan | 9055 |
-| `/in7` | 8087 | Singapore | 9056 |
-| `/in8` | 8088 | United Kingdom | 9057 |
+| Path | Internal Port | Tor Exit Country | Tor Port | Rotates? |
+|------|---------------|-------------------|----------|----------|
+| `/` | 8080 | (direct, real server IP — no Tor) | — | no |
+| `/in1` | 8081 | United States | 9050 | every 60s |
+| `/in2` | 8082 | Germany | 9051 | every 60s |
+| `/in3` | 8083 | France | 9052 | every 60s |
+| `/in4` | 8084 | Netherlands | 9053 | every 60s |
+| `/in5` | 8085 | Canada | 9054 | every 60s |
+| `/in6` | 8086 | Japan | 9055 | every 60s |
+| `/in7` | 8087 | Singapore | 9056 | every 60s |
+| `/in8` | 8088 | United Kingdom | 9057 | every 60s |
+
+`/` (the real-IP location) is now auto-provisioned by `panel-bootstrap.sh`
+just like the 8 Tor locations — you don't need to create it by hand.
 
 If you'd rather build inbounds by hand: Protocol `VLESS`, Listen IP
 `0.0.0.0`, Network `ws`, Security `none`, Path matching the table above
@@ -242,6 +288,20 @@ processes.
 
 **Slow speeds over a Tor outbound** → expected; Tor is inherently slower
 than a direct connection.
+
+**Checking whether rotation is actually working** → hit
+`/tor-status/<location>.json` (e.g. `/tor-status/us.json`) — the
+`exit_ip` field should change roughly every `ROTATE_SECONDS`, and
+`checked_at` should always be recent. `/var/log/tor/rotate.log` inside
+the container has the full rotation history if you need more detail.
+
+**A location's `reachable` flag is often `false`** → that cycle's live
+verification (fetch + ping through the new circuit) didn't complete in
+time, usually because the freshly-built circuit through a strictly
+pinned country is briefly slow. Traffic through the location isn't
+necessarily broken — check the next cycle's status, and if it's
+consistently `false` for one country, check
+`/var/log/tor/<name>/notices.log` for that instance.
 
 ## ⚠️ Notes
 

@@ -241,6 +241,16 @@ LISTEN_PORTS=(8081 8082 8083 8084 8085 8086 8087 8088)
 WS_PATHS=(/in1 /in2 /in3 /in4 /in5 /in6 /in7 /in8)
 TOR_PORTS=(9050 9051 9052 9053 9054 9055 9056 9057)
 
+# The "real IP" location — plain VLESS/WS with no Tor in front of it,
+# routed through the base template's existing "direct" outbound. No
+# routing rule is needed for it (Xray falls through to "direct" for
+# any inbound with no matching rule), so it's provisioned separately
+# from the Tor-backed TAGS loop above.
+DIRECT_TAG="direct-inbound"
+DIRECT_LABEL="Real-IP (No Tor)"
+DIRECT_PORT=8080
+DIRECT_PATH="/"
+
 existing_inbound_tags() {
     api_get "/panel/api/inbounds/list/slim" | jq -r '.obj[]?.tag // empty' 2>/dev/null
 }
@@ -503,6 +513,15 @@ wait_for_panel || exit 0
 login || exit 0
 
 existing=$(existing_inbound_tags)
+
+# --- Real-IP (no Tor) location first ---
+if ! echo "$existing" | grep -qx "$DIRECT_TAG"; then
+    create_inbound "$DIRECT_TAG" "$DIRECT_LABEL" "$DIRECT_PORT" "$DIRECT_PATH"
+else
+    LOG "Inbound tag '${DIRECT_TAG}' already exists, skipping creation."
+fi
+
+# --- 8 Tor-backed locations ---
 for i in "${!TAGS[@]}"; do
     tag="${TAGS[$i]}"
     if ! echo "$existing" | grep -qx "$tag"; then
@@ -513,6 +532,13 @@ for i in "${!TAGS[@]}"; do
 done
 
 sleep 1
+
+direct_id=$(inbound_id_by_tag "$DIRECT_TAG")
+if [ -z "$direct_id" ] || [ "$direct_id" = "null" ]; then
+    LOG "❌ Could not find inbound id for tag '${DIRECT_TAG}' — skipping client creation for it."
+else
+    create_client "$DIRECT_TAG" "$DIRECT_LABEL" "$direct_id"
+fi
 
 for i in "${!TAGS[@]}"; do
     tag="${TAGS[$i]}"
@@ -527,6 +553,7 @@ done
 setup_outbounds_and_routing
 
 LOG "Fetching panel-generated client links..."
+log_client_link "${DIRECT_TAG}-client" "$DIRECT_LABEL"
 for i in "${!TAGS[@]}"; do
     tag="${TAGS[$i]}"
     email="${tag}-client"
