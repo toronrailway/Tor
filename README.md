@@ -55,6 +55,14 @@ Each of the 8 Tor instances gets its own **loopback-only** `ControlPort`
    ```
    Example contents: `{"location":"us","exit_ip":"1.2.3.4","reachable":true,"checked_at":"2026-07-28T12:00:00Z"}`
 
+   All locations in one call:
+   ```
+   https://your-domain.up.railway.app/tor-status/all.json
+   ```
+   returns a JSON array with every location's latest status (rewritten
+   after each full rotation pass), so you can check all 8 Tor exits +
+   the real-IP location without 9 separate requests.
+
 If a rotation's verification fails (exit didn't respond in time), the
 existing circuit is left in place rather than traffic being dropped —
 `reachable:false` just tells you that particular cycle's check didn't

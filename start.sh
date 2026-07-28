@@ -186,6 +186,28 @@ rotate_and_verify() {
     fi
 }
 
+write_status_summary() {
+    # Combines every per-location status file into one JSON array so
+    # you can check all 8 locations (+ the real-IP direct location)
+    # in a single request instead of 9 separate ones:
+    #   GET /tor-status/all.json
+    local all_file="/var/www/tor-status/all.json"
+    local tmp_file
+    tmp_file=$(mktemp)
+    {
+        printf '['
+        local first=1
+        for f in /var/www/tor-status/*.json; do
+            [ -f "$f" ] || continue
+            [ "$(basename "$f")" = "all.json" ] && continue
+            if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
+            cat "$f" | tr -d '\n'
+        done
+        printf ']'
+    } > "$tmp_file"
+    mv "$tmp_file" "$all_file"
+}
+
 echo "▶️  Starting IP rotator (every ${ROTATE_SECONDS}s per location, background)..."
 (
     # Give Tor instances time to fully bootstrap and write their
@@ -197,6 +219,7 @@ echo "▶️  Starting IP rotator (every ${ROTATE_SECONDS}s per location, backgr
             sleep 2
         done
         wait
+        write_status_summary
         sleep "$ROTATE_SECONDS"
     done
 ) > /var/log/tor/rotate.log 2>&1 &
